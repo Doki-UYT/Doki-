@@ -12,6 +12,7 @@ local Workspace = game:GetService("Workspace")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local camera = Workspace.CurrentCamera
+local CUSTOM_IMAGE_ID = "rbxassetid://75701443766284"
 
 local CYAN = Color3.fromRGB(112, 225, 255)
 local BLUE = Color3.fromRGB(0, 100, 255)
@@ -19,7 +20,6 @@ local BLACK = Color3.fromRGB(8, 10, 15)
 local STARTUP_GRAVITY = Workspace.Gravity
 local STARTUP_FOV = 70
 local STARTUP_MAX_ZOOM = player.CameraMaxZoomDistance
-local CUSTOM_IMAGE_ID = "rbxassetid://75701443766284"
 
 type TextWidget = TextLabel | TextButton | TextBox
 
@@ -119,7 +119,6 @@ local ui: Ui = {}
 local fly: FlyConstraints = { attachment = nil, velocity = nil, orientation = nil }
 local noclip: NoclipConstraints = { antiGravity = nil, attachment = nil }
 local espHighlights: { [Instance]: Highlight } = {}
-local espLabels: { [Instance]: BillboardGui } = {}
 local freecamInput: FreecamInput = { forward = 0, right = 0, up = 0 }
 local savedCamera: SavedCamera = {}
 local freecamCFrame: CFrame? = nil
@@ -317,15 +316,13 @@ end
 local function destroyESP()
 	for instance, highlight in pairs(espHighlights) do
 		if highlight then highlight:Destroy() end
-		espHighlights[instance] = nil
-	end
-	for instance, label in pairs(espLabels) do
+		local label = instance:FindFirstChild("DokiESPDistance")
 		if label then label:Destroy() end
-		espLabels[instance] = nil
+		espHighlights[instance] = nil
 	end
 end
 
-local function addESP(target, color, labelText)
+local function addESP(target, color)
 	if not target or espHighlights[target] then return end
 	local highlight = Instance.new("Highlight")
 	highlight.Name = "DokiESP"
@@ -337,39 +334,19 @@ local function addESP(target, color, labelText)
 	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 	highlight.Parent = target
 	espHighlights[target] = highlight
-
-	local anchor = target:IsA("Model") and (target:FindFirstChild("Head") or target:FindFirstChild("HumanoidRootPart") or target.PrimaryPart) or target
-	if anchor and anchor:IsA("BasePart") then
-		local billboard = Instance.new("BillboardGui")
-		billboard.Name = "DokiESPDistance"
-		billboard.Adornee = anchor
-		billboard.Size = UDim2.fromOffset(132, 24)
-		billboard.StudsOffset = Vector3.new(0, 3, 0)
-		billboard.AlwaysOnTop = true
-		billboard.Parent = target
-		local label = Instance.new("TextLabel")
-		label.Size = UDim2.fromScale(1, 1)
-		label.BackgroundTransparency = 1
-		label.Font = Enum.Font.GothamBold
-		label.TextSize = 13
-		label.TextColor3 = color
-		label.TextStrokeTransparency = 0.4
-		label.Text = labelText or ""
-		label.Parent = billboard
-		espLabels[target] = billboard
+	local part = target:IsA("Model") and (target:FindFirstChild("HumanoidRootPart") or target.PrimaryPart) or (target:IsA("BasePart") and target)
+	if part and part:IsA("BasePart") and state.root then
+		local billboard = Instance.new("BillboardGui"); billboard.Name = "DokiESPDistance"; billboard.Adornee = part; billboard.Size = UDim2.fromOffset(100, 20); billboard.StudsOffset = Vector3.new(0, 3, 0); billboard.AlwaysOnTop = true; billboard.Parent = target
+		local text = Instance.new("TextLabel"); text.BackgroundTransparency = 1; text.Size = UDim2.fromScale(1, 1); text.TextColor3 = color; text.TextStrokeTransparency = 0; text.Font = Enum.Font.GothamBold; text.TextSize = 12; text.Text = string.format("%.0f M", (part.Position - state.root.Position).Magnitude); text.Parent = billboard
 	end
 end
 
 local function updateESP()
 	destroyESP()
 	if not state.esp then return end
+	if state.character then addESP(state.character, Color3.fromRGB(210, 210, 210)) end
 	for _, other in ipairs(Players:GetPlayers()) do
-		if other.Character then
-			local otherRoot = other.Character:FindFirstChild("HumanoidRootPart")
-			local distance = state.root and otherRoot and math.floor((state.root.Position - otherRoot.Position).Magnitude + 0.5) or 0
-			local color = other == player and Color3.fromRGB(210, 210, 210) or Color3.fromRGB(55, 150, 255)
-			addESP(other.Character, color, string.format("%s • %dm", other.Name, distance))
-		end
+		if other ~= player and other.Character then addESP(other.Character, BLUE) end
 	end
 	for _, model in ipairs(Workspace:GetDescendants()) do
 		if model:IsA("Model") and model ~= state.character then
@@ -377,13 +354,12 @@ local function updateESP()
 			local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
 			if humanoid and root and not Players:GetPlayerFromCharacter(model) then
 				local moving = root.AssemblyLinearVelocity.Magnitude > 0.5
-				local distance = state.root and math.floor((state.root.Position - root.Position).Magnitude + 0.5) or 0
-				addESP(model, moving and Color3.fromRGB(255, 75, 75) or Color3.fromRGB(80, 255, 110), string.format("%s • %dm", model.Name, distance))
+				addESP(model, moving and Color3.fromRGB(255, 75, 75) or Color3.fromRGB(80, 255, 110))
 			end
 		end
 	end
 	-- Mark non-NPC objects intentionally in Studio with CollectionService tag "DokiESPObject".
-	for _, object in ipairs(CollectionService:GetTagged("DokiESPObject")) do addESP(object, Color3.fromRGB(160, 160, 160), object.Name) end
+	for _, object in ipairs(CollectionService:GetTagged("DokiESPObject")) do addESP(object, Color3.fromRGB(160, 160, 160)) end
 end
 
 local function stopFreecam()
@@ -435,13 +411,13 @@ local function buildUI()
 	icon.Image = CUSTOM_IMAGE_ID
 	icon.BackgroundColor3 = BLACK
 	icon.Parent = gui
-	Instance.new("UICorner", icon).CornerRadius = UDim.new(0, 9)
+	Instance.new("UICorner", icon).CornerRadius = UDim.new(0, 14)
 	local stroke = Instance.new("UIStroke", icon)
 	stroke.Color = CYAN; stroke.Thickness = 2
 
 	local hub = Instance.new("Frame")
 	hub.Name = "Hub"
-	hub.Position = UDim2.new(0, 64, 0.5, -137)
+	hub.Position = UDim2.new(0, 59, 0.5, -137)
 	hub.Size = UDim2.fromOffset(254, 273)
 	hub.BackgroundColor3 = BLACK
 	hub.Visible = false
@@ -451,19 +427,19 @@ local function buildUI()
 	hubStroke.Name = "AnimatedStroke"; hubStroke.Thickness = 2; hubStroke.Color = CYAN
 
 	local title = Instance.new("TextLabel")
-	title.BackgroundTransparency = 1; title.Position = UDim2.fromOffset(10, 6); title.Size = UDim2.new(1, -44, 0, 20)
-	title.Font = Enum.Font.GothamBold; title.TextSize = 14; title.TextXAlignment = Enum.TextXAlignment.Left
-	title.TextColor3 = CYAN; title.Text = "Doki"; title.Parent = hub
+	title.Active = true; title.BackgroundTransparency = 1; title.Position = UDim2.fromOffset(16, 10); title.Size = UDim2.new(1, -62, 0, 30)
+	title.Font = Enum.Font.GothamBold; title.TextSize = 22; title.TextXAlignment = Enum.TextXAlignment.Left
+	title.TextColor3 = CYAN; title.Text = "Doki💤"; title.Parent = hub
 	local close = Instance.new("TextButton")
-	close.Position = UDim2.new(1, -28, 0, 6); close.Size = UDim2.fromOffset(20, 20); close.Text = "×"
-	close.Font = Enum.Font.GothamBold; close.TextSize = 16; close.TextColor3 = Color3.new(1,1,1); close.BackgroundColor3 = Color3.fromRGB(28,32,42); close.Parent = hub
+	close.Position = UDim2.new(1, -42, 0, 10); close.Size = UDim2.fromOffset(30, 30); close.Text = "×"
+	close.Font = Enum.Font.GothamBold; close.TextSize = 24; close.TextColor3 = Color3.new(1,1,1); close.BackgroundColor3 = Color3.fromRGB(28,32,42); close.Parent = hub
 	Instance.new("UICorner", close).CornerRadius = UDim.new(0, 7)
 	local divider = Instance.new("Frame")
-	divider.Position = UDim2.fromOffset(10, 31); divider.Size = UDim2.new(1, -20, 0, 1); divider.BorderSizePixel = 0
+	divider.Position = UDim2.fromOffset(16, 47); divider.Size = UDim2.new(1, -32, 0, 2); divider.BorderSizePixel = 0
 	divider.BackgroundColor3 = CYAN; divider.BackgroundTransparency = 0.25; divider.Parent = hub
 
 	local scroll = Instance.new("ScrollingFrame")
-	scroll.Position = UDim2.fromOffset(8, 38); scroll.Size = UDim2.new(1, -16, 1, -46)
+	scroll.Position = UDim2.fromOffset(12, 58); scroll.Size = UDim2.new(1, -24, 1, -70)
 	scroll.BackgroundTransparency = 1; scroll.BorderSizePixel = 0; scroll.ScrollBarThickness = 5; scroll.CanvasSize = UDim2.new()
 	scroll.Parent = hub
 	local layout = Instance.new("UIListLayout", scroll)
@@ -472,20 +448,20 @@ local function buildUI()
 
 	local function button(text, callback)
 		local b = Instance.new("TextButton")
-		b.Size = UDim2.new(1, 0, 0, 22); b.BackgroundColor3 = Color3.fromRGB(20,24,34); b.TextColor3 = Color3.new(1,1,1)
-		b.Font = Enum.Font.Gotham; b.TextSize = 10; b.Text = text; b.Parent = scroll
+		b.Size = UDim2.new(1, 0, 0, 34); b.BackgroundColor3 = Color3.fromRGB(20,24,34); b.TextColor3 = Color3.new(1,1,1)
+		b.Font = Enum.Font.Gotham; b.TextSize = 14; b.Text = text; b.Parent = scroll
 		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 7)
 		local s = Instance.new("UIStroke", b); s.Color = Color3.fromRGB(35,75,100); s.Thickness = 1
 		connect(b.Activated, callback)
 		return b
 	end
 	local function numericRow(caption, initial, min, max, onChanged, resetCallback)
-		local row = Instance.new("Frame"); row.Size = UDim2.new(1,0,0,22); row.BackgroundTransparency = 1; row.Parent = scroll
-		local label = Instance.new("TextLabel"); label.Size = UDim2.new(0.48,0,1,0); label.BackgroundTransparency = 1; label.TextColor3 = Color3.new(1,1,1); label.Font = Enum.Font.Gotham; label.TextSize = 9; label.TextXAlignment = Enum.TextXAlignment.Left; label.Text = caption .. " ("..min.."-"..max..")"; label.Parent = row
-		local box = Instance.new("TextBox"); box.Position = UDim2.new(0.5,0,0,0); box.Size = UDim2.new(0.28,0,1,0); box.BackgroundColor3 = Color3.fromRGB(20,24,34); box.TextColor3 = CYAN; box.Font = Enum.Font.Gotham; box.TextSize = 10; box.Text = tostring(initial); box.ClearTextOnFocus = false; box.Parent = row; Instance.new("UICorner",box).CornerRadius=UDim.new(0,4)
+		local row = Instance.new("Frame"); row.Size = UDim2.new(1,0,0,34); row.BackgroundTransparency = 1; row.Parent = scroll
+		local label = Instance.new("TextLabel"); label.Size = UDim2.new(0.48,0,1,0); label.BackgroundTransparency = 1; label.TextColor3 = Color3.new(1,1,1); label.Font = Enum.Font.Gotham; label.TextSize = 13; label.TextXAlignment = Enum.TextXAlignment.Left; label.Text = caption .. " ("..min.."–"..max..")"; label.Parent = row
+		local box = Instance.new("TextBox"); box.Position = UDim2.new(0.5,0,0,0); box.Size = UDim2.new(0.28,0,1,0); box.BackgroundColor3 = Color3.fromRGB(20,24,34); box.TextColor3 = CYAN; box.Font = Enum.Font.Gotham; box.TextSize = 14; box.Text = tostring(initial); box.ClearTextOnFocus = false; box.Parent = row; Instance.new("UICorner",box).CornerRadius=UDim.new(0,6)
 		connect(box.FocusLost, function() onChanged(box.Text) end)
 		if resetCallback then
-			local reset = Instance.new("TextButton"); reset.Position = UDim2.new(0.80,0,0,0); reset.Size = UDim2.new(0.20,0,1,0); reset.BackgroundColor3 = Color3.fromRGB(30,55,76); reset.TextColor3=Color3.new(1,1,1); reset.Font=Enum.Font.Gotham; reset.TextSize=8; reset.Text="Reset"; reset.Parent=row; Instance.new("UICorner",reset).CornerRadius=UDim.new(0,4); connect(reset.Activated, resetCallback)
+			local reset = Instance.new("TextButton"); reset.Position = UDim2.new(0.80,0,0,0); reset.Size = UDim2.new(0.20,0,1,0); reset.BackgroundColor3 = Color3.fromRGB(30,55,76); reset.TextColor3=Color3.new(1,1,1); reset.Font=Enum.Font.Gotham; reset.TextSize=12; reset.Text="Reset"; reset.Parent=row; Instance.new("UICorner",reset).CornerRadius=UDim.new(0,6); connect(reset.Activated, resetCallback)
 		end
 		return box
 	end
@@ -500,7 +476,7 @@ local function buildUI()
 	ui.jumpBox = numericRow("JumpPower", state.jumpPower, 0, 300, setJumpPower)
 	ui.zoomButton = button("Infinite zoom: OFF", function()
 		state.infiniteZoom = not state.infiniteZoom
-		-- 128 studs is Roblox's supported maximum camera distance.
+		-- Roblox clamps CameraMaxZoomDistance; 128 is its supported practical maximum.
 		player.CameraMaxZoomDistance = state.infiniteZoom and 128 or STARTUP_MAX_ZOOM
 		setText(ui.zoomButton, "Infinite zoom: " .. (state.infiniteZoom and "ON" or "OFF"))
 	end)
@@ -545,36 +521,31 @@ local function buildUI()
 	connect(icon.InputEnded, function(input)
 		if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then dragging=false; if not moved then hub.Visible=not hub.Visible; state.hubVisible=hub.Visible end end
 	end)
-	-- Drag only from the title bar so all controls remain easy to use.
-	local hubDragging, hubDragStart, hubStart = false, nil, nil
+	-- Drag only from the title area; this leaves the existing controls untouched.
+	local hubDragging, hubStart, hubInputStart = false, nil, nil
 	connect(title.InputBegan, function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			hubDragging = true; hubDragStart = input.Position; hubStart = hub.Position
+			hubDragging, hubStart, hubInputStart = true, hub.Position, input.Position
 		end
 	end)
 	connect(UserInputService.InputChanged, function(input)
 		if hubDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-			local delta = input.Position - hubDragStart
-			hub.Position = UDim2.new(hubStart.X.Scale, hubStart.X.Offset + delta.X, hubStart.Y.Scale, hubStart.Y.Offset + delta.Y)
+			local d = input.Position - hubInputStart
+			hub.Position = UDim2.new(hubStart.X.Scale, hubStart.X.Offset + d.X, hubStart.Y.Scale, hubStart.Y.Offset + d.Y)
 		end
 	end)
 	connect(UserInputService.InputEnded, function(input)
-		if hubDragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then hubDragging = false end
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then hubDragging = false end
 	end)
 
 	local confirm = Instance.new("Frame")
-	confirm.Name = "CloseConfirmation"; confirm.AnchorPoint = Vector2.new(0.5, 0.5)
-	confirm.Position = UDim2.fromScale(0.5, 0.5); confirm.Size = UDim2.fromOffset(85, 91)
-	confirm.BackgroundColor3 = Color3.fromRGB(18, 22, 31); confirm.Visible = false; confirm.ZIndex = 10; confirm.Parent = gui
-	Instance.new("UICorner", confirm).CornerRadius = UDim.new(0, 7)
-	local confirmStroke = Instance.new("UIStroke", confirm); confirmStroke.Color = CYAN; confirmStroke.Thickness = 1
-	local question = Instance.new("TextLabel")
-	question.BackgroundTransparency = 1; question.Position = UDim2.fromOffset(6, 7); question.Size = UDim2.new(1, -12, 0, 28)
-	question.Font = Enum.Font.GothamBold; question.TextSize = 9; question.TextWrapped = true; question.TextColor3 = Color3.new(1,1,1); question.Text = "pipi,pipipipipi?"; question.ZIndex = 11; question.Parent = confirm
-	local nah = Instance.new("TextButton")
-	nah.Position = UDim2.fromOffset(8, 42); nah.Size = UDim2.fromOffset(69, 18); nah.BackgroundColor3 = Color3.fromRGB(38, 45, 58); nah.Text = "Nah"; nah.TextColor3 = Color3.new(1,1,1); nah.Font = Enum.Font.GothamBold; nah.TextSize = 9; nah.ZIndex = 11; nah.Parent = confirm; Instance.new("UICorner", nah).CornerRadius = UDim.new(0, 4)
-	local cooking = Instance.new("TextButton")
-	cooking.Position = UDim2.fromOffset(8, 65); cooking.Size = UDim2.fromOffset(69, 18); cooking.BackgroundColor3 = Color3.fromRGB(24, 97, 120); cooking.Text = "Cooking now"; cooking.TextColor3 = Color3.new(1,1,1); cooking.Font = Enum.Font.GothamBold; cooking.TextSize = 8; cooking.ZIndex = 11; cooking.Parent = confirm; Instance.new("UICorner", cooking).CornerRadius = UDim.new(0, 4)
+	confirm.Name = "CloseConfirmation"; confirm.Size = UDim2.fromOffset(130, 91); confirm.Position = UDim2.new(0.5, -65, 0.5, -45)
+	confirm.BackgroundColor3 = BLACK; confirm.Visible = false; confirm.ZIndex = 10; confirm.Parent = hub
+	Instance.new("UICorner", confirm).CornerRadius = UDim.new(0, 8)
+	local confirmText = Instance.new("TextLabel")
+	confirmText.BackgroundTransparency = 1; confirmText.Position = UDim2.fromOffset(8, 8); confirmText.Size = UDim2.fromOffset(68, 72); confirmText.TextWrapped = true; confirmText.Text = "pipi,pipipipipi?"; confirmText.TextColor3 = Color3.new(1,1,1); confirmText.Font = Enum.Font.Gotham; confirmText.TextSize = 11; confirmText.ZIndex = 11; confirmText.Parent = confirm
+	local nah = Instance.new("TextButton"); nah.Text = "Nah"; nah.Position = UDim2.fromOffset(79, 16); nah.Size = UDim2.fromOffset(44, 24); nah.BackgroundColor3 = Color3.fromRGB(28,32,42); nah.TextColor3 = Color3.new(1,1,1); nah.TextSize = 10; nah.ZIndex = 11; nah.Parent = confirm; Instance.new("UICorner", nah).CornerRadius = UDim.new(0, 5)
+	local cooking = Instance.new("TextButton"); cooking.Text = "Cooking now"; cooking.Position = UDim2.fromOffset(79, 48); cooking.Size = UDim2.fromOffset(44, 28); cooking.BackgroundColor3 = Color3.fromRGB(30,55,76); cooking.TextColor3 = Color3.new(1,1,1); cooking.TextSize = 8; cooking.TextWrapped = true; cooking.ZIndex = 11; cooking.Parent = confirm; Instance.new("UICorner", cooking).CornerRadius = UDim.new(0, 5)
 	connect(close.Activated, function() confirm.Visible = true end)
 	connect(nah.Activated, function() confirm.Visible = false end)
 	connect(cooking.Activated, function() state.dead = true end)
@@ -590,8 +561,9 @@ end
 local function onCharacter(character: Model)
 	stopFly(); destroyNoclipGroundLock()
 	state.character = character
-	local humanoid = character:WaitForChild("Humanoid") :: Humanoid
-	local root = character:WaitForChild("HumanoidRootPart") :: BasePart
+	local humanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid", 10)
+	local root = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 10)
+	if not humanoid or not root or not humanoid:IsA("Humanoid") or not root:IsA("BasePart") then return end
 	state.humanoid = humanoid
 	state.root = root
 	state.defaultWalkSpeed = humanoid.WalkSpeed
@@ -670,9 +642,10 @@ connect(RunService.RenderStepped, function(dt)
 		local right = (UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.A) and 1 or 0)
 		local vertical = (UserInputService:IsKeyDown(Enum.KeyCode.Space) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) and 1 or 0)
 		local camCF = camera.CFrame
-		-- Humanoid.MoveDirection makes fly respond to Roblox's mobile thumbstick as well as WASD.
-		local mobileDirection = humanoid and humanoid.MoveDirection or Vector3.zero
-		local direction = camCF.LookVector*forward + camCF.RightVector*right + Vector3.yAxis*vertical + mobileDirection
+		local mobile = humanoid and humanoid.MoveDirection or Vector3.zero
+		local mobileForward = mobile:Dot(camCF.LookVector)
+		local mobileRight = mobile:Dot(camCF.RightVector)
+		local direction = camCF.LookVector*(forward + mobileForward) + camCF.RightVector*(right + mobileRight) + Vector3.yAxis*vertical
 		if direction.Magnitude > 0 then direction = direction.Unit end
 		local velocity = fly.velocity
 		local orientation = fly.orientation
@@ -687,9 +660,8 @@ connect(RunService.RenderStepped, function(dt)
 	if state.freecam and camera then
 		freecamCFrame = camera.CFrame
 		local cf=camera.CFrame
-		-- Use the character's movement direction on touch devices; freecam remains independent of the character's position.
-		local mobileDirection = humanoid and humanoid.MoveDirection or Vector3.zero
-		local move=(cf.LookVector*freecamInput.forward + cf.RightVector*freecamInput.right + Vector3.yAxis*freecamInput.up + mobileDirection)
+		local mobile = humanoid and humanoid.MoveDirection or Vector3.zero
+		local move=(cf.LookVector*(freecamInput.forward + mobile:Dot(cf.LookVector)) + cf.RightVector*(freecamInput.right + mobile:Dot(cf.RightVector)) + Vector3.yAxis*freecamInput.up)
 		if move.Magnitude>0 then camera.CFrame += move.Unit*70*dt end
 	end
 end)
