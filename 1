@@ -475,9 +475,10 @@ local function buildUI()
 	ui.walkBox = numericRow("WalkSpeed", state.walkSpeed, 0, 300, setWalkSpeed)
 	ui.jumpBox = numericRow("JumpPower", state.jumpPower, 0, 300, setJumpPower)
 	ui.zoomButton = button("Infinite zoom: OFF", function()
-		state.infiniteZoom = not state.infiniteZoom
-		-- Roblox clamps CameraMaxZoomDistance; 128 is its supported practical maximum.
-		player.CameraMaxZoomDistance = state.infiniteZoom and 128 or STARTUP_MAX_ZOOM
+	state.infiniteZoom = not state.infiniteZoom
+		-- CameraMaxZoomDistance is the supported Player camera limit. Roblox clamps
+		-- it at 128 studs, so use the full engine-supported distance when enabled.
+		player.CameraMaxZoomDistance = state.infiniteZoom and math.max(STARTUP_MAX_ZOOM, 128) or STARTUP_MAX_ZOOM
 		setText(ui.zoomButton, "Infinite zoom: " .. (state.infiniteZoom and "ON" or "OFF"))
 	end)
 	ui.infJumpButton = button("Infinite Jump: OFF", function() state.infJump=not state.infJump; setText(ui.infJumpButton, "Infinite Jump: "..(state.infJump and "ON" or "OFF")) end)
@@ -613,6 +614,7 @@ connect(UserInputService.InputChanged, function(input, processed)
 end)
 
 local espElapsed = 0
+local fpsFrames = 0
 connect(RunService.Heartbeat, function(dt)
 	if state.dead then return end
 	-- Dynamic ground-lock only counters gravity while a close floor is detected. It avoids falling through floors but is not a full character-controller replacement.
@@ -622,7 +624,10 @@ connect(RunService.Heartbeat, function(dt)
 	if state.noclipActive and antiGravity and root and character then
 		local params=RaycastParams.new(); params.FilterType=Enum.RaycastFilterType.Exclude; params.FilterDescendantsInstances={character}
 		local hit=Workspace:Raycast(root.Position, Vector3.new(0,-4.5,0), params)
-		antiGravity.Enabled = hit ~= nil
+		-- Only hold the surface while standing still or descending.  Never apply
+		-- the ground lock during upward movement, so jumps can pass through and
+		-- land on higher platforms without a ceiling-like lock.
+		antiGravity.Enabled = hit ~= nil and root.AssemblyLinearVelocity.Y <= 0
 		if hit then antiGravity.Force=Vector3.new(0, root.AssemblyMass*Workspace.Gravity, 0) end
 	end
 	espElapsed += dt
@@ -633,6 +638,7 @@ connect(RunService.Heartbeat, function(dt)
 end)
 
 connect(RunService.RenderStepped, function(dt)
+	fpsFrames += 1
 	camera = Workspace.CurrentCamera
 	local root = state.root
 	local humanoid = state.humanoid
@@ -670,7 +676,11 @@ task.spawn(function()
 	local last = os.clock()
 	while not state.dead do
 		task.wait(0.1)
-		local now=os.clock(); local fps=math.min(240, 1/math.max(now-last, 0.0001)); last=now
+		local now = os.clock()
+		local elapsed = math.max(now - last, 0.0001)
+		local fps = math.min(240, fpsFrames / elapsed)
+		fpsFrames = 0
+		last = now
 		setText(ui.fps, string.format("fps: %.1f", fps))
 	end
 end)
