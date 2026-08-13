@@ -301,14 +301,14 @@ local function setJumpPower(value)
 end
 
 local function setFov(value)
-	state.fov = math.floor(clampNumber(value, 1, 640, state.fov) + 0.5)
+	state.fov = math.floor(clampNumber(value, 1, 120, state.fov) + 0.5)
 	camera = Workspace.CurrentCamera
 	if camera then camera.FieldOfView = state.fov end
 	setText(ui.fovBox, tostring(state.fov))
 end
 
 local function setGravity(value)
-	state.gravity = clampNumber(value, -50, 1000, state.gravity)
+	state.gravity = clampNumber(value, -500, 1000, state.gravity)
 	Workspace.Gravity = state.gravity
 	setText(ui.gravityBox, tostring(math.floor(state.gravity + 0.5)))
 end
