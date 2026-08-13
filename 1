@@ -1,0 +1,659 @@
+-- DokiHub (Studio / experience-owner developer utility)
+-- Put this LocalScript in StarterPlayer > StarterPlayerScripts.
+-- Uses only Roblox-supported services and APIs; it is not for executors/injection.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ContextActionService = game:GetService("ContextActionService")
+local CollectionService = game:GetService("CollectionService")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local camera = Workspace.CurrentCamera
+
+local CYAN = Color3.fromRGB(112, 225, 255)
+local BLUE = Color3.fromRGB(0, 100, 255)
+local BLACK = Color3.fromRGB(8, 10, 15)
+local STARTUP_GRAVITY = Workspace.Gravity
+local STARTUP_FOV = 70
+local STARTUP_MAX_ZOOM = player.CameraMaxZoomDistance
+
+type TextWidget = TextLabel | TextButton | TextBox
+
+type State = {
+	dead: boolean,
+	hubVisible: boolean,
+	character: Model?,
+	humanoid: Humanoid?,
+	root: BasePart?,
+	defaultWalkSpeed: number,
+	defaultJumpPower: number,
+	walkSpeed: number,
+	jumpPower: number,
+	flySpeed: number,
+	noclipWanted: boolean,
+	noclipActive: boolean,
+	flying: boolean,
+	infJump: boolean,
+	shiftLock: boolean,
+	shiftControl: boolean,
+	esp: boolean,
+	freecam: boolean,
+	fov: number,
+	gravity: number,
+	infiniteZoom: boolean,
+	lastFreecamDash: number,
+}
+
+type Ui = {
+	gui: ScreenGui?,
+	flyButton: TextButton?,
+	flySpeedBox: TextBox?,
+	noclipButton: TextButton?,
+	walkBox: TextBox?,
+	jumpBox: TextBox?,
+	zoomButton: TextButton?,
+	infJumpButton: TextButton?,
+	shiftButton: TextButton?,
+	shiftFloating: TextButton?,
+	espButton: TextButton?,
+	gravityBox: TextBox?,
+	fovBox: TextBox?,
+	freecamButton: TextButton?,
+	fps: TextLabel?,
+	fpsButton: TextButton?,
+}
+
+type FlyConstraints = {
+	attachment: Attachment?,
+	velocity: LinearVelocity?,
+	orientation: AlignOrientation?,
+}
+
+type NoclipConstraints = {
+	antiGravity: VectorForce?,
+	attachment: Attachment?,
+}
+
+type FreecamInput = {
+	forward: number,
+	right: number,
+	up: number,
+}
+
+type SavedCamera = {
+	cameraType: Enum.CameraType?,
+	subject: Instance?,
+}
+
+local state: State = {
+	dead = false,
+	hubVisible = false,
+	character = nil,
+	humanoid = nil,
+	root = nil,
+	defaultWalkSpeed = 16,
+	defaultJumpPower = 50,
+	walkSpeed = 16,
+	jumpPower = 50,
+	flySpeed = 100,
+	noclipWanted = false,
+	noclipActive = false,
+	flying = false,
+	infJump = false,
+	shiftLock = false,
+	shiftControl = false,
+	esp = false,
+	freecam = false,
+	fov = STARTUP_FOV,
+	gravity = STARTUP_GRAVITY,
+	infiniteZoom = false,
+	lastFreecamDash = -math.huge,
+}
+
+local connections: { RBXScriptConnection } = {}
+local ui: Ui = {}
+local fly: FlyConstraints = { attachment = nil, velocity = nil, orientation = nil }
+local noclip: NoclipConstraints = { antiGravity = nil, attachment = nil }
+local espHighlights: { [Instance]: Highlight } = {}
+local freecamInput: FreecamInput = { forward = 0, right = 0, up = 0 }
+local savedCamera: SavedCamera = {}
+local freecamCFrame: CFrame? = nil
+
+local function connect(signal: RBXScriptSignal, callback: (...any) -> ())
+	local connection = signal:Connect(callback)
+	table.insert(connections, connection)
+	return connection
+end
+
+local function setText(label: Instance?, text: string)
+    if not label then
+        return
+    end
+
+    if label:IsA("TextLabel") then
+        label.Text = text
+    elseif label:IsA("TextButton") then
+        label.Text = text
+    elseif label:IsA("TextBox") then
+        label.Text = text
+    end
+end
+
+local function clampNumber(value, minimum, maximum, fallback)
+	value = tonumber(value)
+	if not value then return fallback end
+	return math.clamp(value, minimum, maximum)
+end
+
+local function getCharacterParts(): { BasePart }
+	local character = state.character
+	if not character then return {} end
+	local parts: { BasePart } = {}
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant:IsA("BasePart") then table.insert(parts, descendant) end
+	end
+	return parts
+end
+
+local function restoreCharacterCollision()
+	for _, part in ipairs(getCharacterParts()) do
+		part.CanCollide = part.Name ~= "HumanoidRootPart"
+	end
+	local root = state.root
+	if root then root.CanCollide = false end -- normal characters normally use humanoid physics, not root collision
+end
+
+local function applyNoCollision(enabled)
+	for _, part in ipairs(getCharacterParts()) do
+		part.CanCollide = not enabled and part.Name ~= "HumanoidRootPart"
+	end
+	local root = state.root
+	if root then root.CanCollide = false end
+end
+
+local function destroyNoclipGroundLock()
+	local antiGravity = noclip.antiGravity
+	local attachment = noclip.attachment
+	if antiGravity then antiGravity:Destroy() end
+	if attachment then attachment:Destroy() end
+	noclip.antiGravity = nil
+	noclip.attachment = nil
+end
+
+local function startNoclipGroundLock()
+	destroyNoclipGroundLock()
+	local root = state.root
+	if not root then return end
+
+	-- Keep local references non-optional while configuring the Instances.  The
+	-- optional table fields are only for later cleanup after this function ends.
+	local attachment: Attachment = Instance.new("Attachment")
+	attachment.Name = "DokiGroundLockAttachment"
+	attachment.Parent = root
+
+	local antiGravity: VectorForce = Instance.new("VectorForce")
+	antiGravity.Name = "DokiGroundLock"
+	antiGravity.Attachment0 = attachment
+	antiGravity.RelativeTo = Enum.ActuatorRelativeTo.World
+	antiGravity.ApplyAtCenterOfMass = true
+	antiGravity.Enabled = false
+	antiGravity.Parent = root
+
+	noclip.attachment = attachment
+	noclip.antiGravity = antiGravity
+end
+
+-- Collision ownership is deliberately exclusive: Fly wins over Noclip.
+local function setNoclip(active)
+	state.noclipActive = active
+	if active then
+		applyNoCollision(true)
+		startNoclipGroundLock()
+	else
+		destroyNoclipGroundLock()
+		if not state.flying then restoreCharacterCollision() end
+	end
+	if ui.noclipButton then ui.noclipButton.Text = "Noclip: " .. (state.noclipWanted and "ON" or "OFF") end
+end
+
+local function destroyFlyConstraints()
+	for _, object in pairs(fly) do
+		if object then object:Destroy() end
+	end
+	fly = { attachment = nil, velocity = nil, orientation = nil }
+end
+
+local function stopFly()
+	if not state.flying then return end
+	state.flying = false
+	destroyFlyConstraints()
+	local humanoid = state.humanoid
+	if humanoid then humanoid.PlatformStand = false end
+	-- Required ordering: Fly off -> restore collision -> Noclip takes ownership if requested.
+	restoreCharacterCollision()
+	if state.noclipWanted then setNoclip(true) end
+	if ui.flyButton then ui.flyButton.Text = "Fly: OFF" end
+end
+
+local function startFly()
+	local root = state.root
+	local humanoid = state.humanoid
+	if state.flying or not root or not humanoid then return end
+	-- Required ordering: Noclip off -> restore collision -> Fly manages collision.
+	if state.noclipActive then setNoclip(false) end
+	restoreCharacterCollision()
+	state.flying = true
+	applyNoCollision(true)
+	humanoid.PlatformStand = true
+
+	-- The references saved in fly are optional because cleanup clears them.
+	-- Configure the newly-created constraints through non-optional locals first.
+	local attachment: Attachment = Instance.new("Attachment")
+	attachment.Name = "DokiFlyAttachment"
+	attachment.Parent = root
+
+	local velocity: LinearVelocity = Instance.new("LinearVelocity")
+	velocity.Name = "DokiFlyVelocity"
+	velocity.Attachment0 = attachment
+	velocity.RelativeTo = Enum.ActuatorRelativeTo.World
+	velocity.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+	velocity.MaxForce = 100000
+	velocity.VectorVelocity = Vector3.zero
+	velocity.Parent = root
+
+	local orientation: AlignOrientation = Instance.new("AlignOrientation")
+	orientation.Name = "DokiFlyOrientation"
+	orientation.Attachment0 = attachment
+	orientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
+	orientation.RigidityEnabled = true
+	orientation.MaxTorque = 100000
+	orientation.Parent = root
+
+	fly.attachment = attachment
+	fly.velocity = velocity
+	fly.orientation = orientation
+	if ui.flyButton then ui.flyButton.Text = "Fly: ON" end
+end
+
+local function setFly(enabled)
+	if enabled then startFly() else stopFly() end
+end
+
+local function setWalkSpeed(value)
+	state.walkSpeed = clampNumber(value, 0, 300, state.walkSpeed)
+	local humanoid = state.humanoid
+	if humanoid then humanoid.WalkSpeed = state.walkSpeed end
+	setText(ui.walkBox, tostring(math.floor(state.walkSpeed + 0.5)))
+end
+
+local function setJumpPower(value)
+	state.jumpPower = clampNumber(value, 0, 300, state.jumpPower)
+	local humanoid = state.humanoid
+	if humanoid then
+		humanoid.UseJumpPower = true
+		humanoid.JumpPower = state.jumpPower
+	end
+	setText(ui.jumpBox, tostring(math.floor(state.jumpPower + 0.5)))
+end
+
+local function setFov(value)
+	state.fov = math.floor(clampNumber(value, 1, 640, state.fov) + 0.5)
+	camera = Workspace.CurrentCamera
+	if camera then camera.FieldOfView = state.fov end
+	setText(ui.fovBox, tostring(state.fov))
+end
+
+local function setGravity(value)
+	state.gravity = clampNumber(value, -50, 1000, state.gravity)
+	Workspace.Gravity = state.gravity
+	setText(ui.gravityBox, tostring(math.floor(state.gravity + 0.5)))
+end
+
+local function destroyESP()
+	for instance, highlight in pairs(espHighlights) do
+		if highlight then highlight:Destroy() end
+		espHighlights[instance] = nil
+	end
+end
+
+local function addESP(target, color)
+	if not target or espHighlights[target] then return end
+	local highlight = Instance.new("Highlight")
+	highlight.Name = "DokiESP"
+	highlight.Adornee = target
+	highlight.FillColor = color
+	highlight.OutlineColor = color
+	highlight.FillTransparency = 0.65
+	highlight.OutlineTransparency = 0
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.Parent = target
+	espHighlights[target] = highlight
+end
+
+local function updateESP()
+	destroyESP()
+	if not state.esp then return end
+	for _, other in ipairs(Players:GetPlayers()) do
+		if other ~= player and other.Character then addESP(other.Character, Color3.new(1, 1, 1)) end
+	end
+	for _, model in ipairs(Workspace:GetDescendants()) do
+		if model:IsA("Model") and model ~= state.character then
+			local humanoid = model:FindFirstChildOfClass("Humanoid")
+			local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+			if humanoid and root and not Players:GetPlayerFromCharacter(model) then
+				local moving = root.AssemblyLinearVelocity.Magnitude > 0.5
+				addESP(model, moving and Color3.fromRGB(255, 75, 75) or Color3.fromRGB(80, 255, 110))
+			end
+		end
+	end
+	-- Mark non-NPC objects intentionally in Studio with CollectionService tag "DokiESPObject".
+	for _, object in ipairs(CollectionService:GetTagged("DokiESPObject")) do addESP(object, Color3.fromRGB(160, 160, 160)) end
+end
+
+local function stopFreecam()
+	if not state.freecam then return end
+	state.freecam = false
+	camera = Workspace.CurrentCamera
+	if camera then
+		camera.CameraType = savedCamera.cameraType or Enum.CameraType.Custom
+		local subject = savedCamera.subject or state.humanoid
+		if subject then camera.CameraSubject = subject end
+		camera.FieldOfView = state.fov
+	end
+	local humanoid = state.humanoid
+	if humanoid then humanoid.AutoRotate = true end
+	if ui.freecamButton then ui.freecamButton.Text = "Freecam: OFF" end
+end
+
+local function startFreecam()
+	if state.freecam then return end
+	camera = Workspace.CurrentCamera
+	if not camera then return end
+	state.freecam = true
+	savedCamera.cameraType, savedCamera.subject = camera.CameraType, camera.CameraSubject
+	camera.CameraType = Enum.CameraType.Scriptable
+	freecamCFrame = camera.CFrame
+	local humanoid = state.humanoid
+	if humanoid then humanoid.AutoRotate = false end
+	if ui.freecamButton then ui.freecamButton.Text = "Freecam: ON" end
+end
+
+local function setFreecam(enabled)
+	if enabled then startFreecam() else stopFreecam() end
+end
+
+local function buildUI()
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "DokiHubStudio"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = false
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	gui.Parent = playerGui
+	ui.gui = gui
+
+	local icon = Instance.new("ImageButton")
+	icon.Name = "DokiIcon"
+	icon.AnchorPoint = Vector2.new(0, 1)
+	icon.Position = UDim2.new(0, 18, 1, -18)
+	icon.Size = UDim2.fromOffset(58, 58)
+	icon.Image = "rbxassetid://114735154912932"
+	icon.BackgroundColor3 = BLACK
+	icon.Parent = gui
+	Instance.new("UICorner", icon).CornerRadius = UDim.new(0, 14)
+	local stroke = Instance.new("UIStroke", icon)
+	stroke.Color = CYAN; stroke.Thickness = 2
+
+	local hub = Instance.new("Frame")
+	hub.Name = "Hub"
+	hub.Position = UDim2.new(0, 90, 0.5, -210)
+	hub.Size = UDim2.fromOffset(390, 420)
+	hub.BackgroundColor3 = BLACK
+	hub.Visible = false
+	hub.Parent = gui
+	Instance.new("UICorner", hub).CornerRadius = UDim.new(0, 12)
+	local hubStroke = Instance.new("UIStroke", hub)
+	hubStroke.Name = "AnimatedStroke"; hubStroke.Thickness = 2; hubStroke.Color = CYAN
+
+	local title = Instance.new("TextLabel")
+	title.BackgroundTransparency = 1; title.Position = UDim2.fromOffset(16, 10); title.Size = UDim2.new(1, -62, 0, 30)
+	title.Font = Enum.Font.GothamBold; title.TextSize = 22; title.TextXAlignment = Enum.TextXAlignment.Left
+	title.TextColor3 = CYAN; title.Text = "Doki💤"; title.Parent = hub
+	local close = Instance.new("TextButton")
+	close.Position = UDim2.new(1, -42, 0, 10); close.Size = UDim2.fromOffset(30, 30); close.Text = "×"
+	close.Font = Enum.Font.GothamBold; close.TextSize = 24; close.TextColor3 = Color3.new(1,1,1); close.BackgroundColor3 = Color3.fromRGB(28,32,42); close.Parent = hub
+	Instance.new("UICorner", close).CornerRadius = UDim.new(0, 7)
+	local divider = Instance.new("Frame")
+	divider.Position = UDim2.fromOffset(16, 47); divider.Size = UDim2.new(1, -32, 0, 2); divider.BorderSizePixel = 0
+	divider.BackgroundColor3 = CYAN; divider.BackgroundTransparency = 0.25; divider.Parent = hub
+
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Position = UDim2.fromOffset(12, 58); scroll.Size = UDim2.new(1, -24, 1, -70)
+	scroll.BackgroundTransparency = 1; scroll.BorderSizePixel = 0; scroll.ScrollBarThickness = 5; scroll.CanvasSize = UDim2.new()
+	scroll.Parent = hub
+	local layout = Instance.new("UIListLayout", scroll)
+	layout.Padding = UDim.new(0, 6); layout.SortOrder = Enum.SortOrder.LayoutOrder
+	connect(layout:GetPropertyChangedSignal("AbsoluteContentSize"), function() scroll.CanvasSize = UDim2.fromOffset(0, layout.AbsoluteContentSize.Y + 8) end)
+
+	local function button(text, callback)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.new(1, 0, 0, 34); b.BackgroundColor3 = Color3.fromRGB(20,24,34); b.TextColor3 = Color3.new(1,1,1)
+		b.Font = Enum.Font.Gotham; b.TextSize = 14; b.Text = text; b.Parent = scroll
+		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 7)
+		local s = Instance.new("UIStroke", b); s.Color = Color3.fromRGB(35,75,100); s.Thickness = 1
+		connect(b.Activated, callback)
+		return b
+	end
+	local function numericRow(caption, initial, min, max, onChanged, resetCallback)
+		local row = Instance.new("Frame"); row.Size = UDim2.new(1,0,0,34); row.BackgroundTransparency = 1; row.Parent = scroll
+		local label = Instance.new("TextLabel"); label.Size = UDim2.new(0.48,0,1,0); label.BackgroundTransparency = 1; label.TextColor3 = Color3.new(1,1,1); label.Font = Enum.Font.Gotham; label.TextSize = 13; label.TextXAlignment = Enum.TextXAlignment.Left; label.Text = caption .. " ("..min.."–"..max..")"; label.Parent = row
+		local box = Instance.new("TextBox"); box.Position = UDim2.new(0.5,0,0,0); box.Size = UDim2.new(0.28,0,1,0); box.BackgroundColor3 = Color3.fromRGB(20,24,34); box.TextColor3 = CYAN; box.Font = Enum.Font.Gotham; box.TextSize = 14; box.Text = tostring(initial); box.ClearTextOnFocus = false; box.Parent = row; Instance.new("UICorner",box).CornerRadius=UDim.new(0,6)
+		connect(box.FocusLost, function() onChanged(box.Text) end)
+		if resetCallback then
+			local reset = Instance.new("TextButton"); reset.Position = UDim2.new(0.80,0,0,0); reset.Size = UDim2.new(0.20,0,1,0); reset.BackgroundColor3 = Color3.fromRGB(30,55,76); reset.TextColor3=Color3.new(1,1,1); reset.Font=Enum.Font.Gotham; reset.TextSize=12; reset.Text="Reset"; reset.Parent=row; Instance.new("UICorner",reset).CornerRadius=UDim.new(0,6); connect(reset.Activated, resetCallback)
+		end
+		return box
+	end
+
+	ui.flyButton = button("Fly: OFF", function() setFly(not state.flying) end)
+	ui.flySpeedBox = numericRow("Fly speed", state.flySpeed, 10, 300, function(v) state.flySpeed = clampNumber(v,10,300,100); setText(ui.flySpeedBox, tostring(math.floor(state.flySpeed))) end)
+	ui.noclipButton = button("Noclip: OFF", function()
+		state.noclipWanted = not state.noclipWanted
+		if not state.flying then setNoclip(state.noclipWanted) else setText(ui.noclipButton, "Noclip: " .. (state.noclipWanted and "QUEUED" or "OFF")) end
+	end)
+	ui.walkBox = numericRow("WalkSpeed", state.walkSpeed, 0, 300, setWalkSpeed)
+	ui.jumpBox = numericRow("JumpPower", state.jumpPower, 0, 300, setJumpPower)
+	ui.zoomButton = button("Infinite zoom: OFF", function()
+		state.infiniteZoom = not state.infiniteZoom
+		-- Roblox clamps CameraMaxZoomDistance; 128 is its supported practical maximum.
+		player.CameraMaxZoomDistance = state.infiniteZoom and 128 or STARTUP_MAX_ZOOM
+		setText(ui.zoomButton, "Infinite zoom: " .. (state.infiniteZoom and "ON" or "OFF"))
+	end)
+	ui.infJumpButton = button("Infinite Jump: OFF", function() state.infJump=not state.infJump; setText(ui.infJumpButton, "Infinite Jump: "..(state.infJump and "ON" or "OFF")) end)
+	ui.shiftButton = button("Shift Lock button: OFF", function()
+		state.shiftControl = not state.shiftControl
+		setText(ui.shiftButton, "Shift Lock button: " .. (state.shiftControl and "ON" or "OFF"))
+		if ui.shiftFloating then
+			ui.shiftFloating.Visible = state.shiftControl
+			if not state.shiftControl then state.shiftLock = false; ui.shiftFloating.Text = "Shift: OFF" end
+		end
+	end)
+	ui.espButton = button("ESP: OFF", function() state.esp=not state.esp; setText(ui.espButton, "ESP: "..(state.esp and "ON" or "OFF")); updateESP() end)
+	ui.gravityBox = numericRow("Gravity", state.gravity, -50, 1000, setGravity, function() setGravity(STARTUP_GRAVITY) end)
+	ui.fovBox = numericRow("FOV", STARTUP_FOV, 1, 640, setFov, function() setFov(STARTUP_FOV) end)
+	ui.freecamButton = button("Freecam: OFF", function() setFreecam(not state.freecam) end)
+
+	local fps = Instance.new("TextLabel")
+	fps.Name="FPS"; fps.AnchorPoint=Vector2.new(1,0); fps.Position=UDim2.new(1,-16,0,16); fps.Size=UDim2.fromOffset(130,38); fps.BackgroundColor3=BLACK; fps.TextColor3=CYAN; fps.Font=Enum.Font.GothamBold; fps.TextSize=15; fps.Text="fps: 0.0"; fps.Visible=false; fps.Parent=gui; Instance.new("UICorner",fps).CornerRadius=UDim.new(0,8); local fs=Instance.new("UIStroke",fps); fs.Color=BLUE; fs.Thickness=2
+	ui.fps = fps
+	ui.fpsButton = button("FPS display: OFF", function() fps.Visible=not fps.Visible; setText(ui.fpsButton, "FPS display: "..(fps.Visible and "ON" or "OFF")) end)
+	local shiftFloating = Instance.new("TextButton")
+	shiftFloating.Name = "ShiftLockButton"; shiftFloating.AnchorPoint = Vector2.new(1,1); shiftFloating.Position = UDim2.new(1,-18,1,-18); shiftFloating.Size=UDim2.fromOffset(84,38)
+	shiftFloating.BackgroundColor3=Color3.fromRGB(20,24,34); shiftFloating.TextColor3=CYAN; shiftFloating.Font=Enum.Font.GothamBold; shiftFloating.TextSize=13; shiftFloating.Text="Shift: OFF"; shiftFloating.Visible=false; shiftFloating.Parent=gui
+	Instance.new("UICorner",shiftFloating).CornerRadius=UDim.new(0,9); local shiftStroke=Instance.new("UIStroke",shiftFloating); shiftStroke.Color=BLUE; shiftStroke.Thickness=2
+	ui.shiftFloating = shiftFloating
+	connect(shiftFloating.Activated, function()
+		state.shiftLock = not state.shiftLock
+		shiftFloating.Text = "Shift: " .. (state.shiftLock and "ON" or "OFF")
+	end)
+
+	-- The icon is touch/mouse draggable; a short tap toggles the hub.
+	local dragging, dragStart, iconStart, moved = false, nil, nil, false
+	connect(icon.InputBegan, function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging=true; moved=false; dragStart=input.Position; iconStart=icon.Position end
+	end)
+	connect(UserInputService.InputChanged, function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local delta=input.Position-dragStart; moved = moved or delta.Magnitude>6; icon.Position=UDim2.new(iconStart.X.Scale,iconStart.X.Offset+delta.X,iconStart.Y.Scale,iconStart.Y.Offset+delta.Y)
+		end
+	end)
+	connect(icon.InputEnded, function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then dragging=false; if not moved then hub.Visible=not hub.Visible; state.hubVisible=hub.Visible end end
+	end)
+	connect(close.Activated, function()
+		-- Full unload/reset occurs below through cleanup().
+		state.dead = true
+	end)
+
+	task.spawn(function()
+		while not state.dead and gui.Parent do
+			hubStroke.Color = CYAN:Lerp(BLUE, (math.sin(os.clock()*2)+1)/2)
+			task.wait(0.03)
+		end
+	end)
+end
+
+local function onCharacter(character: Model)
+	stopFly(); destroyNoclipGroundLock()
+	state.character = character
+	local humanoid = character:WaitForChild("Humanoid") :: Humanoid
+	local root = character:WaitForChild("HumanoidRootPart") :: BasePart
+	state.humanoid = humanoid
+	state.root = root
+	state.defaultWalkSpeed = humanoid.WalkSpeed
+	state.defaultJumpPower = humanoid.JumpPower
+	humanoid.UseJumpPower = true
+	humanoid.WalkSpeed = state.walkSpeed
+	humanoid.JumpPower = state.jumpPower
+	if state.noclipWanted then setNoclip(true) end
+	connect(humanoid.Died, function() stopFly(); destroyNoclipGroundLock(); if state.freecam then stopFreecam() end end)
+end
+
+buildUI()
+if player.Character then onCharacter(player.Character) end
+connect(player.CharacterAdded, onCharacter)
+
+connect(UserInputService.JumpRequest, function()
+	local humanoid = state.humanoid
+	if state.infJump and humanoid and not state.freecam then humanoid:ChangeState(Enum.HumanoidStateType.Jumping) end
+end)
+
+connect(UserInputService.InputBegan, function(input, processed)
+	if processed then return end
+	local key = input.KeyCode
+	if state.freecam and camera and key == Enum.KeyCode.Space then
+		if os.clock()-state.lastFreecamDash >= 0.5 then camera.CFrame += camera.CFrame.LookVector*100; state.lastFreecamDash=os.clock() end
+		return
+	end
+	if key == Enum.KeyCode.W or key == Enum.KeyCode.Up then freecamInput.forward=1 end
+	if key == Enum.KeyCode.S or key == Enum.KeyCode.Down then freecamInput.forward=-1 end
+	if key == Enum.KeyCode.D or key == Enum.KeyCode.Right then freecamInput.right=1 end
+	if key == Enum.KeyCode.A or key == Enum.KeyCode.Left then freecamInput.right=-1 end
+	if key == Enum.KeyCode.E then freecamInput.up=1 end
+	if key == Enum.KeyCode.Q then freecamInput.up=-1 end
+end)
+connect(UserInputService.InputEnded, function(input)
+	local key=input.KeyCode
+	if key==Enum.KeyCode.W or key==Enum.KeyCode.S or key==Enum.KeyCode.Up or key==Enum.KeyCode.Down then freecamInput.forward=0 end
+	if key==Enum.KeyCode.A or key==Enum.KeyCode.D or key==Enum.KeyCode.Left or key==Enum.KeyCode.Right then freecamInput.right=0 end
+	if key==Enum.KeyCode.Q or key==Enum.KeyCode.E then freecamInput.up=0 end
+end)
+connect(UserInputService.InputChanged, function(input, processed)
+	if state.freecam and not processed and input.UserInputType == Enum.UserInputType.MouseMovement and camera then
+		local delta = input.Delta
+		-- Scriptable cameras do not receive Roblox's standard camera rotation, so rotate it here.
+		camera.CFrame = camera.CFrame * CFrame.Angles(0, -delta.X * 0.0025, 0) * CFrame.Angles(-delta.Y * 0.0025, 0, 0)
+	end
+end)
+
+local espElapsed = 0
+connect(RunService.Heartbeat, function(dt)
+	if state.dead then return end
+	-- Dynamic ground-lock only counters gravity while a close floor is detected. It avoids falling through floors but is not a full character-controller replacement.
+	local antiGravity = noclip.antiGravity
+	local root = state.root
+	local character = state.character
+	if state.noclipActive and antiGravity and root and character then
+		local params=RaycastParams.new(); params.FilterType=Enum.RaycastFilterType.Exclude; params.FilterDescendantsInstances={character}
+		local hit=Workspace:Raycast(root.Position, Vector3.new(0,-4.5,0), params)
+		antiGravity.Enabled = hit ~= nil
+		if hit then antiGravity.Force=Vector3.new(0, root.AssemblyMass*Workspace.Gravity, 0) end
+	end
+	espElapsed += dt
+	if state.esp and espElapsed >= 0.5 then
+		espElapsed = 0
+		updateESP()
+	end
+end)
+
+connect(RunService.RenderStepped, function(dt)
+	camera = Workspace.CurrentCamera
+	local root = state.root
+	local humanoid = state.humanoid
+	if state.flying and root and camera then
+		local forward = (UserInputService:IsKeyDown(Enum.KeyCode.W) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0)
+		forward += (UserInputService:IsKeyDown(Enum.KeyCode.Up) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.Down) and 1 or 0)
+		local right = (UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.A) and 1 or 0)
+		local vertical = (UserInputService:IsKeyDown(Enum.KeyCode.Space) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) and 1 or 0)
+		local camCF = camera.CFrame
+		local direction = camCF.LookVector*forward + camCF.RightVector*right + Vector3.yAxis*vertical
+		if direction.Magnitude > 0 then direction = direction.Unit end
+		local velocity = fly.velocity
+		local orientation = fly.orientation
+		if velocity then velocity.VectorVelocity = direction * state.flySpeed end
+		if orientation then orientation.CFrame = CFrame.lookAt(root.Position, root.Position + camCF.LookVector) end
+	end
+	if state.shiftLock and not state.freecam and root and camera and humanoid then
+		humanoid.AutoRotate=false
+		local look=Vector3.new(camera.CFrame.LookVector.X,0,camera.CFrame.LookVector.Z)
+		if look.Magnitude>0 then root.CFrame=CFrame.lookAt(root.Position,root.Position+look) end
+	elseif humanoid and not state.freecam then humanoid.AutoRotate=true end
+	if state.freecam and camera then
+		freecamCFrame = camera.CFrame
+		local cf=camera.CFrame
+		local move=(cf.LookVector*freecamInput.forward + cf.RightVector*freecamInput.right + Vector3.yAxis*freecamInput.up)
+		if move.Magnitude>0 then camera.CFrame += move.Unit*70*dt end
+	end
+end)
+
+task.spawn(function()
+	local last = os.clock()
+	while not state.dead do
+		task.wait(0.1)
+		local now=os.clock(); local fps=math.min(240, 1/math.max(now-last, 0.0001)); last=now
+		setText(ui.fps, string.format("fps: %.1f", fps))
+	end
+end)
+
+local function cleanup()
+	stopFly(); stopFreecam(); destroyNoclipGroundLock(); destroyESP()
+	state.noclipWanted=false; state.noclipActive=false
+	local humanoid = state.humanoid
+	if humanoid then humanoid.WalkSpeed=state.defaultWalkSpeed; humanoid.JumpPower=state.defaultJumpPower; humanoid.AutoRotate=true end
+	restoreCharacterCollision()
+	Workspace.Gravity=STARTUP_GRAVITY
+	if camera then camera.FieldOfView=STARTUP_FOV end
+	player.CameraMaxZoomDistance=STARTUP_MAX_ZOOM
+	for _, connection in ipairs(connections) do connection:Disconnect() end
+	if ui.gui then ui.gui:Destroy() end
+end
+
+task.spawn(function()
+    while not state.dead do
+        task.wait(0.1)
+    end
+
+    cleanup()
+end)
