@@ -478,7 +478,7 @@ local function buildUI()
 	state.infiniteZoom = not state.infiniteZoom
 		-- CameraMaxZoomDistance is the supported Player camera limit. Roblox clamps
 		-- it at 128 studs, so use the full engine-supported distance when enabled.
-		player.CameraMaxZoomDistance = state.infiniteZoom and math.max(STARTUP_MAX_ZOOM, 99999) or STARTUP_MAX_ZOOM
+		player.CameraMaxZoomDistance = state.infiniteZoom and math.max(STARTUP_MAX_ZOOM, 9999999999999999999999999999999999999999999999999999999) or STARTUP_MAX_ZOOM
 		setText(ui.zoomButton, "Infinite zoom: " .. (state.infiniteZoom and "ON" or "OFF"))
 	end)
 	ui.infJumpButton = button("Infinite Jump: OFF", function() state.infJump=not state.infJump; setText(ui.infJumpButton, "Infinite Jump: "..(state.infJump and "ON" or "OFF")) end)
